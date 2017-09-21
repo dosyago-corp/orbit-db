@@ -8,10 +8,12 @@ const CounterStore = require('orbit-db-counterstore')
 const DocumentStore = require('orbit-db-docstore')
 const Pubsub = require('orbit-db-pubsub')
 const Cache = require('orbit-db-cache')
+const Keystore = require('orbit-db-keystore')
 const parseAddress = require('./parse-address')
+const AccessController = require('./ipfs-access-controller')
 
 class OrbitDB {
-  constructor(ipfs, options = {}) {
+  constructor(ipfs, directory = './orbitdb', options = {}) {
     this._ipfs = ipfs
     this.id = options.peerId || (this._ipfs._peerInfo ? this._ipfs._peerInfo.id._idB58String : 'default')
     this._pubsub = options && options.broker 
@@ -19,6 +21,8 @@ class OrbitDB {
       : new Pubsub(ipfs, this.id)
     this.stores = {}
     this.types = ['eventlog', 'feed', 'docstore', 'counter', 'keyvalue']
+    this.keystore = new Keystore(path.join(directory, this.id, '/keystore'))
+    this.key = this.keystore.getKey(this.id) || this.keystore.createKey(this.id)
   }
 
   /* Databases */
@@ -34,12 +38,12 @@ class OrbitDB {
     return this._createStore(KeyValueStore, dbname, options)
   }
 
-  counter(dbname, options) {
-    return this._createStore(CounterStore, dbname, options)
+  async counter(address, options) {
+    return this.open(address, options.path, Object.assign({ sync: false }, options), 'counter')
   }
 
-  docstore(dbname, options) {
-    return this._createStore(DocumentStore, dbname, options)
+  async docstore(address, options) {
+    return this.open(address, options.path, Object.assign({ sync: false }, options), 'docstore')
   }
 
   disconnect() {
@@ -48,52 +52,117 @@ class OrbitDB {
     this.stores = {}
   }
 
-  create (address, type, directory, options) {
+  async create (address, type, directory, options) {
     const p = path.join(directory || './orbitdb')
-    const addr = OrbitDB.parseAddress(address, this.id)
-    this._cache = new Cache(p, addr.indexOf('/orbitdb') === 0 ? addr.replace('/orbitdb', '') : addr)
-    options = Object.assign({}, options, { path: p, cache: this._cache })
-    return this._cache.load()
-      .then(() => this._cache.get(addr))
-      .then((hash) => {
-        if (hash) 
-          throw new Error(`Database '${addr}' already exists!`)
+    // const keystore = new Keystore(path.join(p, this.id, '/keystore'))
+    const key = this.keystore.getKey(this.id) || this.keystore.createKey(this.id)
 
-          if (!OrbitDB.isValidType(this.types, type))
-            throw new Error(`Invalid database type '${type}'.`)
+    // Create Access Controller
+    const accessController = new AccessController(this._ipfs)
+    // Add the creator as the admin of the database
+    accessController.add('admin', key.getPublic('hex'))
+    if (options && options.write) {
+      // Add write access keys
+      options.write.forEach(e => accessController.add('write', e))
+    }
+    // Persist in IPFS
+    const accessControllerAddress = await accessController.save()
+
+    // Create database manifest file
+    const createDBManifest = () => {
+      return {
+        name: address.toString(),
+        type: type,
+        accessController: path.join('/ipfs', accessControllerAddress),
+      }
+    }
+
+    const manifest = createDBManifest()
+    // console.log(manifest)
+
+    let addr
+    let manifestHash
+    return this._ipfs.object.put(new Buffer(JSON.stringify(manifest)))
+      .then((dag) => dag.toJSON().multihash.toString())
+      // .then((hash) => console.log(hash))
+      .then((hash) => {
+        manifestHash = hash
+        addr = OrbitDB.parseAddress(address, manifestHash)
+        // console.log("addr1", addr)
+        this._cache = new Cache(p, addr.indexOf('/orbitdb') === 0 ? addr.replace('/orbitdb', '') : addr)
+        options = Object.assign({}, options, { path: p, cache: this._cache, accessController: manifest.accessController })
+        return this._cache.load()
+      })
+      .then(() => this._cache.get(addr + ".manifest"))
+      .then((hash) => {
+        if (hash) {
+          throw new Error(`Database '${addr}' already exists!`)
+        }
+
+        if (!OrbitDB.isValidType(this.types, type)) {
+          throw new Error(`Invalid database type '${type}'.`)
+        }
+
+        if (!hash)
+          return this._cache.set(addr + '.manifest', manifestHash)
       })
       .then(() => this._cache.set(addr + '.type', type))
+      // TODO: check if needed
       .then(() => this._cache.set(addr + '.localhead', null))
+      // TODO: check if needed
       .then(() => this._cache.set(addr + '.remotehead', null))
       .then(() => this._openDatabase(addr, type, options))
   }
 
-  load (address, directory, options) {
-    const p = path.join(directory || './orbitdb')
+  async open (address, directory, options, createAsType) {
+    const dbpath = path.join(directory || './orbitdb')
     const addr = OrbitDB.parseAddress(address, this.id)
-    this._cache = new Cache(p, addr.indexOf('/orbitdb') === 0 ? addr.replace('/orbitdb', '') : addr)
-    options = Object.assign({}, options, { path: p, cache: this._cache })
-    return this._cache.load()
+    const addressWithoutProtocol = addr.indexOf('/orbitdb') === 0 ? addr.replace('/orbitdb', '') : addr
+    this._cache = new Cache(dbpath, addressWithoutProtocol)
+    options = Object.assign({ sync: true }, options, { path: dbpath, cache: this._cache })
+
+    // console.log("addr2", addr)
+
+    // Get the manifest hash from the address:
+    // /orbitdb/QmYrkqiKHezNQyiNdnjue4RapKnipKY9CYZb1a3bRSxmxE/1506687819429
+    //          ^-------------- manifest hash ---------------^
+    const manifestHash = addressWithoutProtocol.split('/').filter(e => e && e !== '')[0]
+
+    await this._cache.load()
+    const localManifest = await this._cache.get(addr + '.manifest')
+
+    // console.log("1", addr, address, localManifest, createAsType)
+    if (!localManifest && !options.sync) {
+      if (createAsType) {
+        return this.create(address, createAsType, directory, options)
+      }
+      return Promise.resolve(null)
+    }
+
+    let manifest = {}
+    return this._ipfs.object.get(manifestHash)
+      .then((obj) => JSON.parse(obj.toJSON().data))
+      .then(async (data) => {
+        manifest = data
+        // console.log("manifest:", manifest)
+        options.accessController = manifest.accessController
+      })
+      .then(() => this._cache.set(addr + '.manifest', manifestHash))
       .then(() => this._cache.get(addr + '.type'))
       .then((type) => {
-        if (!type && !options.type)
-          throw new Error(`Database '${addr}' doesn't exist.`)
-        else if (!type && options.type && options.create === true)
-          return this.create(address, options.type, directory, options)
-        else
-          return this._openDatabase(addr, type, options)
+        return this._openDatabase(addr, manifest.type, options)
       })
   }
 
   _openDatabase (dbname, type, options) {
     if (type === 'counter')
-      return this.counter(dbname, options)
+      return this._createStore(CounterStore, dbname, options)
     else if (type === 'eventlog')
       return this.eventlog(dbname, options)
     else if (type === 'feed')
       return this.feed(dbname, options)
     else if (type === 'docstore')
-      return this.docstore(dbname, options)
+      return this._createStore(DocumentStore, dbname, options)
     else if (type === 'keyvalue')
       return this.kvstore(dbname, options)
     else
@@ -101,9 +170,16 @@ class OrbitDB {
   }
 
   /* Private methods */
-  _createStore(Store, dbname, options) {
+  async _createStore(Store, dbname, options) {
     const addr = OrbitDB.parseAddress(dbname, this.id)
-    const opts = Object.assign({ replicate: true }, options)
+
+    let accessController
+    if (options.accessController) {
+      accessController = new AccessController(this._ipfs)
+      await accessController.load(options.accessController) 
+    }
+
+    const opts = Object.assign({ replicate: true }, options, { accessController: accessController, keystore: this.keystore })
     const store = new Store(this._ipfs, this.id, dbname, opts)
     store.events.on('write', this._onWrite.bind(this))
     store.events.on('ready', this._onReady.bind(this))

@@ -22,6 +22,9 @@ module.exports = {
     process: 'mock',
     Buffer: true
   },
+  externals: {
+    fs: '{}',
+  },
   plugins: [
     new webpack.DefinePlugin({
       'process.env': {

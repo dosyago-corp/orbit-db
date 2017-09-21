@@ -16,6 +16,7 @@
   },
   "main": "src/OrbitDB.js",
   "dependencies": {
+    "bs58": "^4.0.1",
     "logplease": "^1.2.12",
     "multihashes": "^0.4.9",
     "orbit-db-cache": "~0.0.7",
@@ -23,9 +24,10 @@
     "orbit-db-docstore": "github:orbitdb/orbit-db-docstore#feat/cli",
     "orbit-db-eventstore": "github:orbitdb/orbit-db-eventstore#feat/cli",
     "orbit-db-feedstore": "github:orbitdb/orbit-db-feedstore#feat/cli",
+    "orbit-db-keystore": "haadcode/orbit-db-keystore",
     "orbit-db-kvstore": "github:orbitdb/orbit-db-kvstore#feat/cli",
     "orbit-db-pubsub": "github:orbitdb/orbit-db-pubsub",
-    "orbit-db-store": "~1.0.0"
+    "orbit-db-store": "github:orbitdb/orbit-db-store#feat/write-access"
   },
   "devDependencies": {
     "babel-core": "^6.26.0",

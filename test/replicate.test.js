@@ -81,6 +81,10 @@ describe('orbit-db - Replication', function() {
       db2 = client2.eventlog(db1.path, { 
         path: dbPath2
       })
+
+      // FIX: temp way to give access to others to a db
+      db1._access.write.push(db2._key.getPublic('hex'))
+      db2._access.write.push(db1._key.getPublic('hex'))
     })
 
     it('replicates database of 1 entry', (done) => {

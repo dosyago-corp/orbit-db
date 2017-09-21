@@ -12,6 +12,9 @@ module.exports = {
   },
   target: 'web',
   devtool: 'none',
+  externals: {
+    fs: '{}',
+  },
   node: {
     console: false,
     Buffer: true
